@@ -29,6 +29,7 @@ SPECIAL_TOKENS = {"bos_token": "<bos>",
                   "eos_token": "<eos>",
                   "additional_special_tokens": ["<speaker1>", "<speaker2>"],
                   "pad_token": "<pad>"}
+ADDED_TOKENS = {"<bos>": 40478, "<eos>": 40479, "<speaker1>": 40480, "<speaker2>": 40481, "<pad>": 40482}
 MODEL_INPUTS = ["input_ids", "mc_token_ids", "lm_labels", "mc_labels", "token_type_ids"]
 PADDED_INPUTS = ["input_ids", "lm_labels", "token_type_ids"] 
 
@@ -54,7 +55,8 @@ def pad_dataset(dataset, padding=0):
 def build_input_from_segments(persona, history, reply, tokenizer, lm_labels=False, with_eos=True):
     """ Build a sequence of input from 3 segments: persona, history and last reply """
 
-    special_tokens = {'<bos>', '<eos>', '<speaker1>', '<speaker2>'}
+    import pdb; pdb.set_trace()
+    special_tokens = ['<bos>', '<eos>', '<speaker1>', '<speaker2>']
     bos, eos, speaker1, speaker2 = tokenizer.convert_tokens_to_ids(special_tokens) 
 
     instance = {}
@@ -143,8 +145,9 @@ def train():
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu", help="Device (cuda or cpu)")
     parser.add_argument("--fp16", type=str, default="", help="Set to O0, O1, O2 or O3 for fp16 training (see apex documentation)")
     parser.add_argument("--local_rank", type=int, default=-1, help="Local rank for distributed training (-1: not distributed)")
-    # add option to finetune with yesand dataset 
-    parser.add_argument("--custom", type=bool, default=False, help="Finetune with custom data if True")
+    # add option to finetune with custom dataset 
+    parser.add_argument("--custom", action='store_true', help="Set to finetune with custom dataset")
+
     args = parser.parse_args()
 
     # logging is set to INFO (resp. WARN) for main (resp. auxiliary) process. logger.info => log main process only, logger.warning => log all processes
@@ -152,7 +155,7 @@ def train():
     logger.warning("Running process %d", args.local_rank)  # This is a logger.warning: it will be printed by all distributed processes
     logger.info("Arguments: %s", pformat(args))
 
-    # if training with yesand, change datapath: 
+    # if training with custom dataset, change datapath: 
     if args.custom: 
         args.dataset_path = CUSTOM_DATAPATH 
 
@@ -169,16 +172,15 @@ def train():
     model_class = GPT2DoubleHeadsModel if "gpt2" in args.model_checkpoint else OpenAIGPTDoubleHeadsModel
     model = model_class.from_pretrained(args.model_checkpoint)
 
-    # if finetuning with custom data, the special tokens are already part of the vocab in the pretrained model. 
-    if not args.custom: 
-        num_added_token = tokenizer.add_special_tokens(SPECIAL_TOKENS)
-        logger.info("Number of added tokens: {}".format(num_added_token))
-        logger.info("Special tokens: {}".format(tokenizer.all_special_tokens))
-        model.resize_token_embeddings(len(tokenizer))
+    # resize token embeddings only if adding the special tokens result in newly added tokens 
+    orig_num_tokens = len(tokenizer.encoder)
+    num_added_tokens = tokenizer.add_special_tokens(SPECIAL_TOKENS)
+    if num_added_tokens > 0:
+        model.resize_token_embeddings(new_num_tokens=orig_num_tokens + num_added_tokens)
 
     model.to(args.device)
     # Migration notes: replace with AdamW
-    optimizer = AdamW(model.parameters(), lr=args.lr)
+    optimizer = AdamW(model.parameters(), lr=args.lr, correct_bias=True)
     # optimizer = OpenAIAdam(model.parameters(), lr=args.lr)
 
     # Prepare model for FP16 and distributed training if needed (order is important, distributed should be the last)
@@ -272,7 +274,7 @@ def train():
         torch.save(args, tb_logger.writer.logdir + '/model_training_args.bin')
         getattr(model, 'module', model).config.to_json_file(os.path.join(tb_logger.writer.logdir, CONFIG_NAME))
         tokenizer.save_vocabulary(tb_logger.writer.logdir)
-        with open(os.path.join(tb_logger.writer.logdir, 'special_tokens_map.json'), 'w') as f: 
+        with open(os.path.join(tb_logger.writer.logdir, 'added_tokens.json'), 'w') as f: 
             json.dump(obj=SPECIAL_TOKENS, fp=f)
 
 

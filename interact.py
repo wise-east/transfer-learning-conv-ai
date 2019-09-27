@@ -57,7 +57,7 @@ def top_filtering(logits, top_k=0, top_p=0.0, threshold=-float('Inf'), filter_va
 
 def sample_sequence(personality, history, tokenizer, model, args, current_output=None):
 
-    special_tokens = {'<bos>', '<eos>', '<speaker1>', '<speaker2>'}
+    special_tokens = ['<bos>', '<eos>', '<speaker1>', '<speaker2>']
     special_tokens_ids = tokenizer.convert_tokens_to_ids(special_tokens)
     if current_output is None:
         current_output = []
@@ -85,6 +85,7 @@ def sample_sequence(personality, history, tokenizer, model, args, current_output
             while prev.item() in special_tokens_ids:
                 prev = torch.multinomial(probs, num_samples=1)
 
+        # import pdb; pdb.set_trace()
         if prev.item() in special_tokens_ids:
             break
         current_output.append(prev.item())
@@ -128,6 +129,7 @@ def run():
     logger.info("Get pretrained model and tokenizer")
     tokenizer_class = GPT2Tokenizer if "gpt2" == args.model else OpenAIGPTTokenizer
     tokenizer = tokenizer_class.from_pretrained(args.model_checkpoint)
+    # num_added_tokens = tokenizer.add_special_tokens(SPECIAL_TOKENS)
     model_class = GPT2LMHeadModel if "gpt2" == args.model else OpenAIGPTLMHeadModel
     model = model_class.from_pretrained(args.model_checkpoint)
     # model.resize_token_embeddings(len(tokenizer))
@@ -139,11 +141,19 @@ def run():
     # added the option to opt out of using a personality 
     if args.no_personality: 
         logger.info("No personality is sampled for this chatbot.")
-        personality = ""
+        personality = "" 
+        # personality = ["My name is Isabelle Hawkins.", 
+        #                "I am five years old.", 
+        #                "My phone number is 959-100-9300.", 
+        #                "Here is a link I would like you to check out: google.com.", 
+        #                "I would like to know more about you."]
+        # personality = [tokenizer.encode(p) for p in personality] 
+        # logger.info("Selected custom personality: %s",tokenizer.decode(chain(*personality)))
     else:
         logger.info("Sample a personality")
         personalities = get_dataset_personalities(tokenizer, args.dataset_path, args.dataset_cache)
         personality = random.choice(personalities)
+        # import pdb; pdb.set_trace()
         logger.info("Selected personality: %s", tokenizer.decode(chain(*personality)))
 
     history = []
@@ -153,6 +163,7 @@ def run():
             print('Prompt should not be empty!')
             raw_text = input(">>> ")
         history.append(tokenizer.encode(raw_text))
+
 
         with torch.no_grad():
             out_ids = sample_sequence(personality, history, tokenizer, model, args)
