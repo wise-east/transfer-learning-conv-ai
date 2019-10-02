@@ -133,7 +133,6 @@ def run():
     model_class = GPT2LMHeadModel if "gpt2" == args.model else OpenAIGPTLMHeadModel
     model = model_class.from_pretrained(args.model_checkpoint)
     # model.resize_token_embeddings(len(tokenizer))
-    # import pdb; pdb.set_trace()
 
     model.to(args.device)
     model.eval()
@@ -164,19 +163,26 @@ def run():
         else: 
             history.append(tokenizer.encode(custom_history))
 
+    prompt = input("Speaker 1 >>> ")
+    while not prompt:
+        print('Prompt should not be empty!')
+        prompt = input("Speaker 1 >>> ")
+    history.append(tokenizer.encode(prompt))
+    
+    i = 0 
     while True:
-        raw_text = input(">>> ")
-        while not raw_text:
-            print('Prompt should not be empty!')
-            raw_text = input(">>> ")
-        history.append(tokenizer.encode(raw_text))
-
         with torch.no_grad():
             out_ids = sample_sequence(personality, history, tokenizer, model, args)
         history.append(out_ids)
         history = history[-(2*args.max_history+1):]
         out_text = tokenizer.decode(out_ids, skip_special_tokens=True)
-        print(f"User: {out_text}")
+        i += 1
+        speaker = "Speaker 2" if i%2 else "Speaker 1"
+        print(f"{speaker}: {out_text}")
+
+        if i == 20: 
+            break
     
+
 if __name__ == "__main__":
     run()

@@ -97,7 +97,7 @@ def run():
     parser.add_argument("--dataset_path", type=str, default="", help="Path or url of the dataset. If empty download from S3.")
     parser.add_argument("--dataset_cache", type=str, default='./dataset_cache', help="Path or url of the dataset cache")
     parser.add_argument("--model", type=str, default="gpt", help="Model type (gpt or gpt2)")
-    parser.add_argument("--model_checkpoint", type=str, default="", help="Path, url or short name of the model")
+    parser.add_argument("--model_checkpoint", "-mc", type=str, default="", help="Path, url or short name of the model")
     parser.add_argument("--max_history", type=int, default=2, help="Number of previous utterances to keep in history")
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu", help="Device (cuda or cpu)")
     parser.add_argument("--no_sample", action='store_true', help="Set to use greedy decoding instead of sampling")
@@ -108,7 +108,7 @@ def run():
     parser.add_argument("--top_k", type=int, default=0, help="Filter top-k tokens before sampling (<=0: no filtering)")
     parser.add_argument("--top_p", type=float, default=0.9, help="Nucleus filtering (top-p) before sampling (<=0.0: no filtering)")
     # add option to not use personality
-    parser.add_argument("--no_personality", action='store_true', help="Set to not sample a personality.")
+    parser.add_argument("--no_personality", "-np" action='store_true', help="Set to not sample a personality.")
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO)
@@ -156,6 +156,8 @@ def run():
         # import pdb; pdb.set_trace()
         logger.info("Selected personality: %s", tokenizer.decode(chain(*personality)))
 
+
+    # adapt code for efficient experimentation of existing email exchanges
     history = []
     while True: 
         custom_history = input("Press 0 to end\n\tAdd history: ")
@@ -165,10 +167,10 @@ def run():
             history.append(tokenizer.encode(custom_history))
 
     while True:
-        raw_text = input(">>> ")
+        raw_text = input("Scammer >>> ")
         while not raw_text:
             print('Prompt should not be empty!')
-            raw_text = input(">>> ")
+            raw_text = input("Scammer >>> ")
         history.append(tokenizer.encode(raw_text))
 
         with torch.no_grad():

@@ -55,7 +55,7 @@ def pad_dataset(dataset, padding=0):
 def build_input_from_segments(persona, history, reply, tokenizer, lm_labels=False, with_eos=True):
     """ Build a sequence of input from 3 segments: persona, history and last reply """
 
-    import pdb; pdb.set_trace()
+    # import pdb; pdb.set_trace()
     special_tokens = ['<bos>', '<eos>', '<speaker1>', '<speaker2>']
     bos, eos, speaker1, speaker2 = tokenizer.convert_tokens_to_ids(special_tokens) 
 
