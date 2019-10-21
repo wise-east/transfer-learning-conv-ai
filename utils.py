@@ -7,7 +7,7 @@ import os
 import tarfile
 
 import torch
-from pytorch_transformers import cached_path
+from transformers import cached_path
 from sklearn.model_selection import train_test_split
 
 
