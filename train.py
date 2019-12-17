@@ -8,6 +8,7 @@ from argparse import ArgumentParser
 from collections import defaultdict
 from itertools import chain
 import json
+from tqdm import tqdm 
 
 import torch
 from torch.nn.parallel import DistributedDataParallel
@@ -21,15 +22,17 @@ from ignite.contrib.handlers.tensorboard_logger import TensorboardLogger, Output
 from transformers import (AdamW, OpenAIGPTDoubleHeadsModel, OpenAIGPTTokenizer,
                                      GPT2DoubleHeadsModel, GPT2Tokenizer, WEIGHTS_NAME, CONFIG_NAME)
 
-from utils import get_dataset, get_custom_dataset, CUSTOM_DATAPATH
+from utils import get_dataset, get_custom_dataset
 
-# SPECIAL_TOKENS = ["<bos>", "<eos>", "<speaker1>", "<speaker2>", "<pad>"]
+SPECIAL_TOKENS = ["<bos>", "<eos>", "<speaker1>", "<speaker2>", "<pad>"]
 # Migration notes: needs to be changed to dictionary for adding special tokens
-SPECIAL_TOKENS = {"bos_token": "<bos>", 
+ATTR_TO_SPECIAL_TOKEN = {"bos_token": "<bos>", 
                   "eos_token": "<eos>",
                   "additional_special_tokens": ["<speaker1>", "<speaker2>"],
                   "pad_token": "<pad>"}
-ADDED_TOKENS = {"<bos>": 40478, "<eos>": 40479, "<speaker1>": 40480, "<speaker2>": 40481, "<pad>": 40482}
+
+
+# ADDED_TOKENS = {"<bos>": 40478, "<eos>": 40479, "<speaker1>": 40480, "<speaker2>": 40481, "<pad>": 40482}
 MODEL_INPUTS = ["input_ids", "mc_token_ids", "lm_labels", "mc_labels", "token_type_ids"]
 PADDED_INPUTS = ["input_ids", "lm_labels", "token_type_ids"] 
 
@@ -47,10 +50,21 @@ def average_distributed_scalar(scalar, args):
 def pad_dataset(dataset, padding=0):
     """ Pad the dataset. This could be optimized by defining a Dataset class and pad only batches but this is simpler. """
     max_l = max(len(x) for x in dataset["input_ids"])
+
+    
     for name in PADDED_INPUTS:
+        count = 0 
         dataset[name] = [x + [padding if name != "lm_labels" else -1] * (max_l - len(x)) for x in dataset[name]]
     return dataset
 
+def add_special_tokens_(model, tokenizer):
+    """ Add special tokens to the tokenizer and the model if they have not already been added. """
+    orig_num_tokens = len(tokenizer.encoder)
+    num_added_tokens = tokenizer.add_special_tokens(
+        ATTR_TO_SPECIAL_TOKEN)  # returns 0 and doesn't add if they are already there
+    if num_added_tokens > 0:
+        model.resize_token_embeddings(
+            new_num_tokens=orig_num_tokens + num_added_tokens)
 
 def build_input_from_segments(persona, history, reply, tokenizer, lm_labels=False, with_eos=True):
     """ Build a sequence of input from 3 segments: persona, history and last reply """
@@ -69,6 +83,7 @@ def build_input_from_segments(persona, history, reply, tokenizer, lm_labels=Fals
     instance["lm_labels"] = [-1] * len(instance["input_ids"])
     if lm_labels:
         instance["lm_labels"] = ([-1] * sum(len(s) for s in sequence[:-1])) + [-1] + sequence[-1][1:]
+
     return instance, sequence
 
 
@@ -77,9 +92,9 @@ def get_data_loaders(args, tokenizer):
     """ Prepare the dataset for training and evaluation """
     # to revert to original, only need to change this to get_dataset
     if args.custom: 
-        custom = get_custom_dataset(tokenizer, args.dataset_path, args.dataset_cache)
+        custom = get_custom_dataset(tokenizer, args.dataset_path, args.validset_path)
     else:
-        custom = get_dataset(tokenizer, args.dataset_path, args.dataset_cache)
+        custom = get_dataset(tokenizer, args.dataset_path)
     
     logger.info("Build inputs and labels")
     datasets = {"train": defaultdict(list), "valid": defaultdict(list)}
@@ -87,25 +102,36 @@ def get_data_loaders(args, tokenizer):
         num_candidates = len(dataset[0]["utterances"][0]["candidates"])
         if args.num_candidates > 0 and dataset_name == 'train':
             num_candidates = min(args.num_candidates, num_candidates)
+
+        total_utterance = 0 
         for dialog in dataset:
             persona = dialog["personality"].copy()
             for _ in range(args.personality_permutations):
+                total_utterance += len(dialog["utterances"])
                 for utterance in dialog["utterances"]:
                     history = utterance["history"][-(2*args.max_history+1):]
                     for j, candidate in enumerate(utterance["candidates"][-num_candidates:]):
                         lm_labels = bool(j == num_candidates-1)
                         instance, _ = build_input_from_segments(persona, history, candidate, tokenizer, lm_labels)
+
+
                         for input_name, input_array in instance.items():
                             datasets[dataset_name][input_name].append(input_array)
                     datasets[dataset_name]["mc_labels"].append(num_candidates - 1)
                     datasets[dataset_name]["n_candidates"] = num_candidates
-                # there's no persona given for yesand data 
-                # persona = [persona[-1]] + persona[:-1]  # permuted personalities
+                # there's no persona given for custom data 
+                if args.custom: 
+                    continue 
+                persona = [persona[-1]] + persona[:-1]  # permuted personalities
+
+        count_statement = f"total uttterances in {dataset_name}: {total_utterance}"
+        logger.info(count_statement)
 
     logger.info("Pad inputs and convert to Tensor")
     tensor_datasets = {"train": [], "valid": []}
-    for dataset_name, dataset in datasets.items():
-        dataset = pad_dataset(dataset, padding=tokenizer.convert_tokens_to_ids(SPECIAL_TOKENS["pad_token"]))
+    for dataset_name, dataset in tqdm(datasets.items()):
+        dataset = pad_dataset(dataset, padding=tokenizer.convert_tokens_to_ids(ATTR_TO_SPECIAL_TOKEN["pad_token"]))
+
         for input_name in MODEL_INPUTS:
             tensor = torch.tensor(dataset[input_name])
             if input_name != "mc_labels":
@@ -128,14 +154,16 @@ def train():
     parser = ArgumentParser()
     
     parser.add_argument("--dataset_path", type=str, default="", help="Path or url of the dataset. If empty download from S3.")
-    parser.add_argument("--dataset_cache", type=str, default='./dataset_cache', help="Path or url of the dataset cache")
-    parser.add_argument("--model_checkpoint", type=str, default="openai-gpt", help="Path, url or short name of the model")
+
+    # parser.add_argument("--dataset_cache", type=str, default='./dataset_cache', help="Path or url of the dataset cache")
+    parser.add_argument("--model_checkpoint", "-mc", type=str, default="openai-gpt", help="Path, url or short name of the model")
     parser.add_argument("--num_candidates", type=int, default=2, help="Number of candidates for training")
     parser.add_argument("--max_history", type=int, default=2, help="Number of previous exchanges to keep in history")
-    parser.add_argument("--train_batch_size", type=int, default=4, help="Batch size for training")
-    parser.add_argument("--valid_batch_size", type=int, default=4, help="Batch size for validation")
+    parser.add_argument("--train_batch_size", type=int, default=2, help="Batch size for training")
+    parser.add_argument("--valid_batch_size", type=int, default=2, help="Batch size for validation")
     parser.add_argument("--gradient_accumulation_steps", type=int, default=8, help="Accumulate gradients on several steps")
     parser.add_argument("--lr", type=float, default=6.25e-5, help="Learning rate")
+    parser.add_argument("--adam_epsilon", type=float, default=1e-8, help="Adam optimizer epsilon value")
     parser.add_argument("--lm_coef", type=float, default=1.0, help="LM loss coefficient")
     parser.add_argument("--mc_coef", type=float, default=1.0, help="Multiple-choice loss coefficient")
     parser.add_argument("--max_norm", type=float, default=1.0, help="Clipping gradient norm")
@@ -146,7 +174,9 @@ def train():
     parser.add_argument("--fp16", type=str, default="", help="Set to O0, O1, O2 or O3 for fp16 training (see apex documentation)")
     parser.add_argument("--local_rank", type=int, default=-1, help="Local rank for distributed training (-1: not distributed)")
     # add option to finetune with custom dataset 
-    parser.add_argument("--custom", action='store_true', help="Set to finetune with custom dataset")
+    parser.add_argument("--custom", type=str, default="", help="Path of custom training data. If given, replaces dataset_path")
+    parser.add_argument("--validset_path", type=str, default="", help="Path of the validation set.")
+
 
     args = parser.parse_args()
 
@@ -157,7 +187,7 @@ def train():
 
     # if training with custom dataset, change datapath: 
     if args.custom: 
-        args.dataset_path = CUSTOM_DATAPATH 
+        args.dataset_path = args.custom
 
     # Initialize distributed training if needed
     args.distributed = (args.local_rank != -1)
@@ -168,19 +198,26 @@ def train():
 
     logger.info("Prepare tokenizer, pretrained model and optimizer - add special tokens for fine-tuning")
     tokenizer_class = GPT2Tokenizer if "gpt2" in args.model_checkpoint else OpenAIGPTTokenizer
-    tokenizer = tokenizer_class.from_pretrained(args.model_checkpoint)
+    tokenizer = tokenizer_class.from_pretrained(args.model_checkpoint, cache_dir='/home/nlg-05/hjcho/pretrained_models')
+    
+    
     model_class = GPT2DoubleHeadsModel if "gpt2" in args.model_checkpoint else OpenAIGPTDoubleHeadsModel
-    model = model_class.from_pretrained(args.model_checkpoint)
+    model = model_class.from_pretrained(args.model_checkpoint, cache_dir='/home/nlg-05/hjcho/pretrained_models')
+    model.to(args.device)
+
+    add_special_tokens_(model, tokenizer)
 
     # resize token embeddings only if adding the special tokens result in newly added tokens 
-    orig_num_tokens = len(tokenizer.encoder)
-    num_added_tokens = tokenizer.add_special_tokens(SPECIAL_TOKENS)
-    if num_added_tokens > 0:
-        model.resize_token_embeddings(new_num_tokens=orig_num_tokens + num_added_tokens)
+    # orig_num_tokens = len(tokenizer.encoder)
+    # num_added_tokens = tokenizer.add_special_tokens(SPECIAL_TOKENS)
+    # if num_added_tokens > 0:
+    #     model.resize_token_embeddings(new_num_tokens=orig_num_tokens + num_added_tokens)
 
-    model.to(args.device)
+
+
+    
     # Migration notes: replace with AdamW
-    optimizer = AdamW(model.parameters(), lr=args.lr, correct_bias=True)
+    optimizer = AdamW(model.parameters(), lr=args.lr, correct_bias=True, eps=args.adam_epsilon)
     # optimizer = OpenAIAdam(model.parameters(), lr=args.lr)
 
     # Prepare model for FP16 and distributed training if needed (order is important, distributed should be the last)
@@ -200,7 +237,13 @@ def train():
         
         # Migration notes: the models now return not only the loss but also the logits. The exact return values for each model is specified in the docs. 
         # lm_loss, mc_loss = model(*batch)
-        lm_loss, mc_loss, lm_logits, mc_logits = model(*batch)
+        # lm_loss, mc_loss, lm_logits, mc_logits = model(*batch)
+        input_ids, mc_token_ids, lm_labels, mc_labels, token_type_ids = batch
+        
+        (lm_loss), (mc_loss), *_ = model(
+            input_ids, token_type_ids=token_type_ids, mc_token_ids=mc_token_ids,
+            mc_labels=mc_labels, lm_labels=lm_labels
+        )
 
         loss = (lm_loss * args.lm_coef + mc_loss * args.mc_coef) / args.gradient_accumulation_steps
         if args.fp16:
@@ -222,12 +265,16 @@ def train():
         with torch.no_grad():
             batch = tuple(input_tensor.to(args.device) for input_tensor in batch)
             input_ids, mc_token_ids, lm_labels, mc_labels, token_type_ids = batch
-            logger.info(tokenizer.decode(input_ids[0, -1, :].tolist()))
-            model_outputs = model(input_ids, mc_token_ids, token_type_ids=token_type_ids)
-            lm_logits, mc_logits = model_outputs[0], model_outputs[1]  # So we can also use GPT2 outputs
+            # logger.info(tokenizer.decode(input_ids[0, -1, :].tolist()))
+
+            # if we dont send labels to model, it doesnt return losses
+            lm_logits, mc_logits, *_ = model(
+                input_ids, token_type_ids=token_type_ids, mc_token_ids=mc_token_ids,
+            )
             lm_logits_flat_shifted = lm_logits[..., :-1, :].contiguous().view(-1, lm_logits.size(-1))
             lm_labels_flat_shifted = lm_labels[..., 1:].contiguous().view(-1)
             return (lm_logits_flat_shifted, mc_logits), (lm_labels_flat_shifted, mc_labels)
+
     evaluator = Engine(inference)
 
     # Attach evaluation to trainer: we evaluate when we start the training and at the end of each epoch
@@ -274,8 +321,8 @@ def train():
         torch.save(args, tb_logger.writer.logdir + '/model_training_args.bin')
         getattr(model, 'module', model).config.to_json_file(os.path.join(tb_logger.writer.logdir, CONFIG_NAME))
         tokenizer.save_vocabulary(tb_logger.writer.logdir)
-        with open(os.path.join(tb_logger.writer.logdir, 'added_tokens.json'), 'w') as f: 
-            json.dump(obj=SPECIAL_TOKENS, fp=f)
+        # with open(os.path.join(tb_logger.writer.logdir, 'added_tokens.json'), 'w') as f: 
+        #    json.dump(obj=ATTR_TO_SPECIAL_TOKEN, fp=f)
 
 
     # Run the training

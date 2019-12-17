@@ -1,4 +1,5 @@
 .vscode
+*Tokenizer
 emails/*
 */*
 trained_from_scratch_convai/*

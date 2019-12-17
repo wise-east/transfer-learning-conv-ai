@@ -10,11 +10,14 @@ from pprint import pformat
 import os
 import torch
 import torch.nn.functional as F
-import warnings
+import json
+import nltk 
+from pathlib import Path 
+from tqdm import tqdm 
 
 # Migration Notes: pytorch_pretrained_bert -> pytorch_transformers. 
 from transformers import OpenAIGPTLMHeadModel, OpenAIGPTTokenizer, GPT2LMHeadModel, GPT2Tokenizer
-from train import SPECIAL_TOKENS, build_input_from_segments
+from train import SPECIAL_TOKENS, build_input_from_segments, add_special_tokens_
 from utils import get_dataset_personalities, download_pretrained_model
 
 def top_filtering(logits, top_k=0, top_p=0.0, threshold=-float('Inf'), filter_value=-float('Inf')):
@@ -55,85 +58,65 @@ def top_filtering(logits, top_k=0, top_p=0.0, threshold=-float('Inf'), filter_va
 
     return logits
 
-def predict_next_word(personality, history, tokenizer, model, args, current_output=None):
 
-    # import pdb; pdb.set_trace()
-    instance, sequence = build_input_from_segments(personality, history, current_output, tokenizer, with_eos=False)
-
-    input_ids = torch.tensor(instance["input_ids"], device=args.device).unsqueeze(0)
-    token_type_ids = torch.tensor(instance["token_type_ids"], device=args.device).unsqueeze(0)
-
-    logits = model(input_ids, token_type_ids=token_type_ids)
-
-    if "gpt2" == args.model:
-        logits = logits[0]
-
-    # logits = logits[0, -1, :] / args.temperature
-    # migration notes: logits is a single value tuple. logits -> logits[0]
-    logits = logits[0][0, -1, :] / args.temperature
-
-    logits = top_filtering(logits, top_k=args.top_k, top_p=args.top_p)
-    probs = F.softmax(logits, dim=-1)
-
-    return probs 
- 
-
-def sample_sequence(personality, history, tokenizer, model, args):
+def sample_sequence(personality, history, tokenizer, model, args, current_output=None):
 
     special_tokens = ['<bos>', '<eos>', '<speaker1>', '<speaker2>']
     special_tokens_ids = tokenizer.convert_tokens_to_ids(special_tokens)
+    if current_output is None:
+        current_output = []
 
-    # get probabilities for first word
-    probs = predict_next_word(personality, history, tokenizer, model, args, [])
-    
-    # sample the args.top_c number of samples
-    prev_n = torch.topk(probs, 1)[1] if args.no_sample else torch.multinomial(probs, num_samples=args.top_c, replacement=True)
-    
-    outputs = [] 
-    for i in range(len(prev_n)): 
-        output = [] 
-        for i in range(args.max_length):
-            probs = predict_next_word(personality, history, tokenizer, model, args, output)
-            prev = torch.topk(probs, 1)[1] if args.no_sample else torch.multinomial(probs, num_samples=1)
-            
-            if i < args.min_length and prev.item() in special_tokens_ids:
-                while prev.item() in special_tokens_ids:
-                    if probs.max().item() == 1:
-                        warnings.warn("Warning: model generating special token with probability 1.")
-                        break  # avoid infinitely looping over special token
-                    prev = torch.multinomial(probs, num_samples=args.top_c)
+    for i in range(args.max_length):
+        instance, sequence = build_input_from_segments(personality, history, current_output, tokenizer, with_eos=False)
 
-            if prev.item() in special_tokens_ids: 
-                break 
-            output.append(prev.item())
+        input_ids = torch.tensor(instance["input_ids"], device=args.device).unsqueeze(0)
+        token_type_ids = torch.tensor(instance["token_type_ids"], device=args.device).unsqueeze(0)
 
-        outputs.append(output)
+        logits = model(input_ids, token_type_ids=token_type_ids)
+
+        if isinstance(logits, tuple):  # for gpt2 and maybe others
+            logits = logits[0]
+        logits = logits[0, -1, :] / args.temperature
+        logits = top_filtering(logits, top_k=args.top_k, top_p=args.top_p)
+        probs = F.softmax(logits, dim=-1)
+
+
+        prev = torch.topk(probs, 1)[1] if args.no_sample else torch.multinomial(probs, 1)
+        if i < args.min_length and prev.item() in special_tokens_ids:
+            count = 0 
+            while prev.item() in special_tokens_ids:
+                if probs.max().item() == 1: 
+                    break
+                prev = torch.multinomial(probs, num_samples=1)
+                count += 1 
+                # to prevent endless looping
+                if count == 10: 
+                    break 
 
         # import pdb; pdb.set_trace()
+        if prev.item() in special_tokens_ids:
+            break
+        current_output.append(prev.item())
 
-    return outputs
+    return current_output
 
 def run():
     parser = ArgumentParser()
     parser.add_argument("--dataset_path", type=str, default="", help="Path or url of the dataset. If empty download from S3.")
     parser.add_argument("--dataset_cache", type=str, default='./dataset_cache', help="Path or url of the dataset cache")
-    parser.add_argument("--model", type=str, default="gpt", help="Model type (gpt or gpt2)")
-    parser.add_argument("--model_checkpoint", "-mc", type=str, default="runs/finetuned_yesand_2", help="Path, url or short name of the model")
-    parser.add_argument("--max_history", "-mh", type=int, default=5, help="Number of previous utterances to keep in history")
+    parser.add_argument("--model", type=str, default="gpt2", help="Model type (gpt or gpt2)")
+    parser.add_argument("--model_checkpoint", "-mc", type=str, default="", help="Path, url or short name of the model")
+    parser.add_argument("--max_history", type=int, default=2, help="Number of previous utterances to keep in history")
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu", help="Device (cuda or cpu)")
     parser.add_argument("--no_sample", action='store_true', help="Set to use greedy decoding instead of sampling")
-    parser.add_argument("--max_length", type=int, default=20, help="Maximum length of the output utterances")
+    parser.add_argument("--max_length", type=int, default=50, help="Maximum length of the output utterances")
     parser.add_argument("--min_length", type=int, default=1, help="Minimum length of the output utterances")
     parser.add_argument("--seed", type=int, default=42, help="Seed")
     parser.add_argument("--temperature", type=int, default=0.7, help="Sampling softmax temperature")
     parser.add_argument("--top_k", type=int, default=0, help="Filter top-k tokens before sampling (<=0: no filtering)")
     parser.add_argument("--top_p", type=float, default=0.9, help="Nucleus filtering (top-p) before sampling (<=0.0: no filtering)")
-    # set a number of top choices to show
-    parser.add_argument("--top_c", type=int, default=10, help="Determine how many top choices to be shown.")
     # add option to not use personality
-    parser.add_argument("--no_personality", "-np", action='store_true', help="Set to not sample a personality.")
-    # use text file to deduce results
-    parser.add_argument("--email_sequence", "-es", default=None, help="Provide the text file for which to generate outputs for the chatbot.")
+    parser.add_argument("--no_personality", type=bool, default=True, help="Set to not sample a personality.")
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO)
@@ -147,6 +130,9 @@ def run():
         else: 
             args.model_checkpoint = download_pretrained_model()
 
+    with open("yesands_valid.json", "r") as f: 
+        valid = json.load(f) 
+
     random.seed(args.seed)
     torch.random.manual_seed(args.seed)
     torch.cuda.manual_seed(args.seed)
@@ -154,11 +140,10 @@ def run():
     logger.info("Get pretrained model and tokenizer")
     tokenizer_class = GPT2Tokenizer if "gpt2" == args.model else OpenAIGPTTokenizer
     tokenizer = tokenizer_class.from_pretrained(args.model_checkpoint)
-    # num_added_tokens = tokenizer.add_special_tokens(SPECIAL_TOKENS)
+
     model_class = GPT2LMHeadModel if "gpt2" == args.model else OpenAIGPTLMHeadModel
     model = model_class.from_pretrained(args.model_checkpoint)
-    # model.resize_token_embeddings(len(tokenizer))
-    # import pdb; pdb.set_trace()
+    add_special_tokens_(model, tokenizer)
 
     model.to(args.device)
     model.eval()
@@ -166,7 +151,7 @@ def run():
     # added the option to opt out of using a personality 
     if args.no_personality: 
         logger.info("No personality is sampled for this chatbot.")
-        personality = "" 
+        personality = [""]
         # personality = ["My name is Isabelle Hawkins.", 
         #                "I am five years old.", 
         #                "My phone number is 959-100-9300.", 
@@ -181,55 +166,93 @@ def run():
         # import pdb; pdb.set_trace()
         logger.info("Selected personality: %s", tokenizer.decode(chain(*personality)))
 
+    spont_yesands = valid['yesands']['spont'] 
+    cornell_yesands = valid['yesands']['cornell']
 
-    # adapt code for efficient experimentation of existing email exchanges
-    if args.email_sequence:
-        logger.info(f"Running chatbot generations for {os.path.split(args.email_sequence)[-1]}")
-        while True: 
-            with open(args.email_sequence, 'r') as f: 
-                email_sequence = f.readlines()
-            his_length = int(input("Indicate how many exchanges you want to refer back to - must be an integer. \n1 indicates only the most recent email from the scammer: "))
-            email_sequence = email_sequence[-((his_length-1)*2+1):]
-            history = [tokenizer.encode(e) for e in email_sequence]
+    conv_path = Path(args.model_checkpoint).absolute().name + "_dialogue.txt"
+    f = open(conv_path, 'w')
 
-            logger.info("Used input:\n")
-            for idx, e in enumerate(email_sequence): 
-                output = f"\tUser: {e}" if idx%2 else f"\tScammer: {e}"
-                print(output)
-            with torch.no_grad(): 
-                out_ids = sample_sequence(personality, history, tokenizer, model, args) 
-            out_texts = [tokenizer.decode(o, skip_special_tokens=True) for o in out_ids]
+    for sya in tqdm(spont_yesands): 
+        history = [] 
+        history.append(tokenizer.encode(sya['p']))
 
-            print(f"Top {args.top_c} choices of history length = {his_length}:")
-            for idx, o in enumerate(out_texts): 
-                print(f"\t{idx}: {o}")
-
-    # manual generation 
-    else: 
-        history = []
-        while True: 
-            custom_history = input("Press 0 to end\n\tAdd history: ")
-            if custom_history == '0': 
-                break 
-            else: 
-                history.append(tokenizer.encode(custom_history))
-
-        while True:
-            raw_text = input("Scammer >>> ")
-            while not raw_text:
-                print('Prompt should not be empty!')
-                raw_text = input("Scammer >>> ")
-            history.append(tokenizer.encode(raw_text))
-
+        text_history = ['Prompt (Speaker1): ' + sya['p']] 
+        for i in range(5): 
             with torch.no_grad():
                 out_ids = sample_sequence(personality, history, tokenizer, model, args)
-            # multiple retries 
-            # history.append(out_ids)
-            # history = history[-(2*args.max_history+1):]
-            out_texts = [tokenizer.decode(o, skip_special_tokens=True) for o in out_ids]
-            print(f"Top {args.top_c} choices:")
-            for idx, o in enumerate(out_texts): 
-                print(f"\t{idx}: {o}")
+            
+            history.append(out_ids)
+            history = history[-(2*args.max_history+1):]
+            out_text = tokenizer.decode(out_ids, skip_special_tokens=True)
+            
+            if i == 0: 
+                sya['pred'] = out_text
+
+            text = "Speaker1: " + out_text if i%2 else "Speaker2: " + out_text
+            text_history.append(text)
+
+        f.writelines([text + '\n' for text in text_history])
+        f.write('---------------END---------------\n')
+        
+    
+    for cya in tqdm(cornell_yesands): 
+        history = [] 
+        history.append(tokenizer.encode(cya['p']))
+
+        text_history = ['Prompt (Speaker1): ' + cya['p']] 
+        for i in range(8): 
+            with torch.no_grad():
+                out_ids = sample_sequence(personality, history, tokenizer, model, args)
+            
+            history.append(out_ids)
+            history = history[-(2*args.max_history+1):]
+            out_text = tokenizer.decode(out_ids, skip_special_tokens=True)
+            
+            if i == 0: 
+                cya['pred'] = out_text
+
+            text = "Speaker1: " + out_text if i%2 else "Speaker2: " + out_text
+            text_history.append(text)
+
+        f.writelines([text + '\n' for text in text_history])
+        f.write('---------------END---------------\n')
+
+    f.close()
+
+    pred = {'spont': spont_yesands, 'cornell': cornell_yesands}
+    save_path = Path(args.model_checkpoint).absolute().name + "_valpred.json"
+    with open(save_path, 'w') as f: 
+        json.dump(pred, f, indent=4, sort_keys=True)
+    
+    
+    # sample = valid['yesands']['spont'][0]
+    # print(f"Input: {sample['p']}")
+    
+    # history = []
+    # history.append(tokenizer.encode(input['p']))
+
+    # with torch.no_grad():
+    #     out_ids = sample_sequence(personality, history, tokenizer, model, args)
+    # history.append(out_ids)
+    # history = history[-(2*args.max_history+1):]
+    # out_text = tokenizer.decode(out_ids, skip_special_tokens=True)
+
+
+    # print(f"Model output: {out_text}")
+    # print(f"Gold output: {sample['r']}")
+
+    # bleu2 = nltk.translate.bleu_score.sentence_bleu([sample['r'].lower().split()], out_text.lower().split(), [2])
+    # bleu4 = nltk.translate.bleu_score.sentence_bleu([sample['r'].lower().split()], out_text.lower().split(), [4])
+
+    # nist2 = nltk.translate.nist_score.sentence_nist([sample['r'].lower().split()], out_text.lower().split(), 2)
+    # nist4 = nltk.translate.nist_score.sentence_nist([sample['r'].lower().split()], out_text.lower().split(), 4)
+
+    # meteor = nltk.translate.meteor_score.meteor_score([sample['r']], out_text)
+
+    # print(f"bleu2: {bleu2}, bleu4: {bleu4}, nist2: {nist2}, nist4: {nist4} meteor: {meteor}")
+
+
+
     
 if __name__ == "__main__":
     run()
