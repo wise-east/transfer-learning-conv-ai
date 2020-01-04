@@ -1,9 +1,12 @@
 import json 
 from tqdm import tqdm 
 
-def check_question(response): 
+MIN_NUM_WORDS = 5 
+
+def check_question_response(response): 
     
-    if '?' in response: 
+
+    if '?' in response and len(response.split(' ')) > MIN_NUM_WORDS: 
         return True
     else:
         return False 
@@ -47,14 +50,17 @@ for instance in tqdm(all_data):
         'utterances': [] 
     }
     for utt in instance['utterances']: 
-        if check_question(utt['candidates'][-1]): 
+        if check_question_response(utt['candidates'][-1]): 
             new_instance['utterances'].append(utt)
     
     if len(new_instance['utterances']) > 0: 
         filtered_data.append(new_instance)
 
 
-with open("question_responses.json", 'w') as f:
+print(filtered_data[0])
+print(f"Number of training instances: {len(filtered_data)}")
+
+with open(f"question_responses_longer_than{MIN_NUM_WORDS}.json", 'w') as f:
     json.dump(filtered_data, f, indent=4)
 
 

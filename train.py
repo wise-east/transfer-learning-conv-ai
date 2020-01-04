@@ -75,6 +75,7 @@ def build_input_from_segments(persona, history, reply, tokenizer, lm_labels=Fals
 
     instance = {}
     sequence = [[bos] + list(chain(*persona))] + history + [reply + ([eos] if with_eos else [])]
+    # print(sequence)
     sequence = [sequence[0]] + [[speaker2 if (len(sequence)-i) % 2 else speaker1] + s for i, s in enumerate(sequence[1:])]
 
     instance["input_ids"] = list(chain(*sequence))
