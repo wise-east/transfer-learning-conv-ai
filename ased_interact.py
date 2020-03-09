@@ -11,10 +11,11 @@ import os
 import torch
 import torch.nn.functional as F
 import warnings
+import re 
 
 # Migration Notes: pytorch_pretrained_bert -> pytorch_transformers. 
 from transformers import OpenAIGPTLMHeadModel, OpenAIGPTTokenizer, GPT2LMHeadModel, GPT2Tokenizer
-from train import SPECIAL_TOKENS, build_input_from_segments
+from train import SPECIAL_TOKENS, build_input_from_segments, add_special_tokens_
 from utils import get_dataset_personalities, download_pretrained_model
 
 def top_filtering(logits, top_k=0, top_p=0.0, threshold=-float('Inf'), filter_value=-float('Inf')):
@@ -65,12 +66,12 @@ def predict_next_word(personality, history, tokenizer, model, args, current_outp
 
     logits = model(input_ids, token_type_ids=token_type_ids)
 
-    if "gpt2" == args.model:
+    if isinstance(logits, tuple): 
         logits = logits[0]
 
     # logits = logits[0, -1, :] / args.temperature
     # migration notes: logits is a single value tuple. logits -> logits[0]
-    logits = logits[0][0, -1, :] / args.temperature
+    logits = logits[0, -1, :] / args.temperature
 
     logits = top_filtering(logits, top_k=args.top_k, top_p=args.top_p)
     probs = F.softmax(logits, dim=-1)
@@ -109,16 +110,14 @@ def sample_sequence(personality, history, tokenizer, model, args):
 
         outputs.append(output)
 
-        # import pdb; pdb.set_trace()
-
     return outputs
 
 def run():
     parser = ArgumentParser()
     parser.add_argument("--dataset_path", type=str, default="", help="Path or url of the dataset. If empty download from S3.")
     parser.add_argument("--dataset_cache", type=str, default='./dataset_cache', help="Path or url of the dataset cache")
-    parser.add_argument("--model", type=str, default="gpt", help="Model type (gpt or gpt2)")
-    parser.add_argument("--model_checkpoint", "-mc", type=str, default="runs/finetuned_yesand_2", help="Path, url or short name of the model")
+    parser.add_argument("--model", type=str, default="gpt2", help="Model type (gpt or gpt2)")
+    parser.add_argument("--model_checkpoint", "-mc", type=str, default="runs/gpt2_convai_yesand", help="Path, url or short name of the model")
     parser.add_argument("--max_history", "-mh", type=int, default=5, help="Number of previous utterances to keep in history")
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu", help="Device (cuda or cpu)")
     parser.add_argument("--no_sample", action='store_true', help="Set to use greedy decoding instead of sampling")
@@ -154,12 +153,11 @@ def run():
     logger.info("Get pretrained model and tokenizer")
     tokenizer_class = GPT2Tokenizer if "gpt2" == args.model else OpenAIGPTTokenizer
     tokenizer = tokenizer_class.from_pretrained(args.model_checkpoint)
-    # num_added_tokens = tokenizer.add_special_tokens(SPECIAL_TOKENS)
     model_class = GPT2LMHeadModel if "gpt2" == args.model else OpenAIGPTLMHeadModel
     model = model_class.from_pretrained(args.model_checkpoint)
-    # model.resize_token_embeddings(len(tokenizer))
-    # import pdb; pdb.set_trace()
 
+
+    add_special_tokens_(model, tokenizer)
     model.to(args.device)
     model.eval()
 
@@ -182,6 +180,12 @@ def run():
         logger.info("Selected personality: %s", tokenizer.decode(chain(*personality)))
 
 
+    # test case to see if decoder works as expected. If not, see if special tokens are appropriately added to the tokenizer 
+    test_case = "Hello, my name is Justin. I'd like a strawberry cheesecake."
+    test_encode = tokenizer.encode(test_case)
+    test_decode = tokenizer.decode(test_encode)
+    assert test_case == test_decode
+
     # adapt code for efficient experimentation of existing email exchanges
     if args.email_sequence:
         logger.info(f"Running chatbot generations for {os.path.split(args.email_sequence)[-1]}")
@@ -189,7 +193,9 @@ def run():
             with open(args.email_sequence, 'r') as f: 
                 email_sequence = f.readlines()
             his_length = int(input("Indicate how many exchanges you want to refer back to - must be an integer. \n1 indicates only the most recent email from the scammer: "))
+            email_sequence = [e for e in email_sequence if re.sub('\n', '', e)] # remove any empty lines 
             email_sequence = email_sequence[-((his_length-1)*2+1):]
+           
             history = [tokenizer.encode(e) for e in email_sequence]
 
             logger.info("Used input:\n")
@@ -198,6 +204,7 @@ def run():
                 print(output)
             with torch.no_grad(): 
                 out_ids = sample_sequence(personality, history, tokenizer, model, args) 
+
             out_texts = [tokenizer.decode(o, skip_special_tokens=True) for o in out_ids]
 
             print(f"Top {args.top_c} choices of history length = {his_length}:")

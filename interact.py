@@ -33,7 +33,7 @@ def run():
     parser.add_argument("--top_k", type=int, default=0, help="Filter top-k tokens before sampling (<=0: no filtering)")
     parser.add_argument("--top_p", type=float, default=0.9, help="Nucleus filtering (top-p) before sampling (<=0.0: no filtering)")
     # add option to not use personality
-    parser.add_argument("--no_personality", type=bool, default=True, help="Set to not sample a personality.")
+    parser.add_argument("--no_personality", "-np", action='store_true', help="Set to not sample a personality.")
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO)

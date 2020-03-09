@@ -29,7 +29,7 @@ def run():
     parser.add_argument("--max_length", type=int, default=100, help="Maximum length of the output utterances")
     parser.add_argument("--min_length", type=int, default=1, help="Minimum length of the output utterances")
     parser.add_argument("--seed", type=int, default=42, help="Seed")
-    parser.add_argument("--temperature", type=int, default=0.7, help="Sampling softmax temperature")
+    parser.add_argument("--temperature", type=float, default=0.7, help="Sampling softmax temperature")
     parser.add_argument("--top_k", type=int, default=0, help="Filter top-k tokens before sampling (<=0: no filtering)")
     parser.add_argument("--top_p", type=float, default=0.9, help="Nucleus filtering (top-p) before sampling (<=0.0: no filtering)")
     # add option to not use personality
@@ -87,7 +87,8 @@ def run():
     #         history.append(tokenizer.encode(custom_history))
 
     while True: 
-        history = [] 
+        history = []
+        args.temperature = float(input("Set temperature: > 0 and <= 1"))
         prompt = input("Speaker 1 >>> ")
         while not prompt:
             print('Prompt should not be empty!')
